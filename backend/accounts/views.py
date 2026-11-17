@@ -65,9 +65,6 @@ class LoginView(APIView):
         if not user:
             return Response({'detail': 'Invalid credentials.'}, status=status.HTTP_401_UNAUTHORIZED)
 
-        if user.role == 'TEACHER' and not user.is_approved_teacher:
-            return Response({'detail': 'Teacher account is pending administrator approval.'}, status=status.HTTP_403_FORBIDDEN)
-
         refresh = RefreshToken.for_user(user)
         user_data = UserSerializer(user).data
 

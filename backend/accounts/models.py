@@ -7,11 +7,11 @@ class UserRole(models.TextChoices):
 
 class User(AbstractUser):
     role = models.CharField(max_length=20, choices=UserRole.choices, default=UserRole.STUDENT)
-    is_approved_teacher = models.BooleanField(default=False)
+    is_approved_teacher = models.BooleanField(default=True)
     phone_number = models.CharField(max_length=20, blank=True, null=True)
 
     def is_teacher(self):
-        return self.role == UserRole.TEACHER and self.is_approved_teacher
+        return self.role == UserRole.TEACHER
 
     def is_student(self):
         return self.role == UserRole.STUDENT
