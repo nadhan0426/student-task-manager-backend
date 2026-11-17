@@ -6,7 +6,6 @@ from django.utils import timezone
 from django.contrib.auth import get_user_model
 from classes.models import Classroom, ClassEnrollment, ClassJoinRequest
 from classes.serializers import ClassroomSerializer, ClassEnrollmentSerializer, ClassJoinRequestSerializer
-from accounts.permissions import IsApprovedTeacher, IsStudentUser
 from accounts.serializers import UserSerializer
 from notifications.models import Notification
 
@@ -30,9 +29,12 @@ class ClassroomViewSet(viewsets.ModelViewSet):
             raise permissions.PermissionDenied("Only teachers can create classrooms.")
         serializer.save(teacher=self.request.user)
 
-    @action(detail=True, methods=['post'], permission_classes=[IsApprovedTeacher])
+    @action(detail=True, methods=['post'])
     def add_student(self, request, pk=None):
         classroom = self.get_object()
+        if classroom.teacher != request.user:
+            return Response({'detail': 'Not authorized.'}, status=status.HTTP_403_FORBIDDEN)
+
         identifier = request.data.get('identifier')
         if not identifier:
             return Response({'detail': 'Student username or email is required.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -63,16 +65,17 @@ class ClassroomViewSet(viewsets.ModelViewSet):
 
         return Response(ClassEnrollmentSerializer(enrollment).data, status=status.HTTP_200_OK if not created else status.HTTP_201_CREATED)
 
-    @action(detail=True, methods=['get'], permission_classes=[IsApprovedTeacher])
+    @action(detail=True, methods=['get'])
     def students(self, request, pk=None):
         classroom = self.get_object()
-        enrollments = ClassEnrollment.objects.filter(classroom=classroom, is_active=True).select_related('student', 'student__student_profile')
+        enrollments = ClassEnrollment.objects.filter(classroom=classroom, is_active=True).select_related('student')
         students = [e.student for e in enrollments]
         return Response(UserSerializer(students, many=True).data)
 
-    @action(detail=False, methods=['post'], permission_classes=[IsStudentUser])
+    @action(detail=False, methods=['post', 'get'])
     def check_code(self, request):
-        code = request.data.get('code', '').strip().upper()
+        code = request.data.get('code') or request.query_params.get('code', '')
+        code = code.strip().upper()
         if not code:
             return Response({'detail': 'Class code is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -89,7 +92,7 @@ class ClassroomViewSet(viewsets.ModelViewSet):
 
         return Response(ClassroomSerializer(classroom).data, status=status.HTTP_200_OK)
 
-    @action(detail=False, methods=['post'], permission_classes=[IsStudentUser])
+    @action(detail=False, methods=['post'])
     def request_join(self, request):
         code = request.data.get('code', '').strip().upper()
         if not code:
@@ -129,29 +132,36 @@ class ClassroomViewSet(viewsets.ModelViewSet):
 
         return Response(ClassJoinRequestSerializer(join_req).data, status=status.HTTP_201_CREATED)
 
-    @action(detail=False, methods=['get'], permission_classes=[IsApprovedTeacher])
+    @action(detail=False, methods=['get'])
     def pending_requests(self, request):
+        if not request.user.is_teacher():
+            return Response([], status=status.HTTP_200_OK)
         managed_classes = Classroom.objects.filter(teacher=request.user)
         requests = ClassJoinRequest.objects.filter(
             classroom__in=managed_classes, status='PENDING'
         ).select_related('student', 'classroom').order_by('-requested_at')
         return Response(ClassJoinRequestSerializer(requests, many=True).data)
 
-    @action(detail=True, methods=['post'], permission_classes=[IsApprovedTeacher])
-    def approve_request(self, request, pk=None):
-        classroom = self.get_object()
+    @action(detail=False, methods=['post'])
+    def approve_request(self, request):
         request_id = request.data.get('request_id')
+        if not request_id:
+            return Response({'detail': 'request_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
         try:
-            join_req = ClassJoinRequest.objects.get(id=request_id, classroom=classroom)
+            join_req = ClassJoinRequest.objects.select_related('classroom', 'student').get(id=request_id)
         except ClassJoinRequest.DoesNotExist:
             return Response({'detail': 'Join request not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        if join_req.classroom.teacher != request.user:
+            return Response({'detail': 'Not authorized.'}, status=status.HTTP_403_FORBIDDEN)
 
         join_req.status = 'APPROVED'
         join_req.reviewed_at = timezone.now()
         join_req.save()
 
         ClassEnrollment.objects.get_or_create(
-            classroom=classroom,
+            classroom=join_req.classroom,
             student=join_req.student,
             defaults={'is_active': True}
         )
@@ -159,20 +169,25 @@ class ClassroomViewSet(viewsets.ModelViewSet):
         Notification.objects.create(
             recipient=join_req.student,
             title="Join Request Approved",
-            message=f"Your request to join '{classroom.name}' has been approved by your teacher!",
+            message=f"Your request to join '{join_req.classroom.name}' has been approved by your teacher!",
             notification_type='SYSTEM'
         )
 
         return Response(ClassJoinRequestSerializer(join_req).data, status=status.HTTP_200_OK)
 
-    @action(detail=True, methods=['post'], permission_classes=[IsApprovedTeacher])
-    def reject_request(self, request, pk=None):
-        classroom = self.get_object()
+    @action(detail=False, methods=['post'])
+    def reject_request(self, request):
         request_id = request.data.get('request_id')
+        if not request_id:
+            return Response({'detail': 'request_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
         try:
-            join_req = ClassJoinRequest.objects.get(id=request_id, classroom=classroom)
+            join_req = ClassJoinRequest.objects.select_related('classroom', 'student').get(id=request_id)
         except ClassJoinRequest.DoesNotExist:
             return Response({'detail': 'Join request not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        if join_req.classroom.teacher != request.user:
+            return Response({'detail': 'Not authorized.'}, status=status.HTTP_403_FORBIDDEN)
 
         join_req.status = 'REJECTED'
         join_req.reviewed_at = timezone.now()
@@ -181,21 +196,25 @@ class ClassroomViewSet(viewsets.ModelViewSet):
         Notification.objects.create(
             recipient=join_req.student,
             title="Join Request Status",
-            message=f"Your request to join '{classroom.name}' was not approved.",
+            message=f"Your request to join '{join_req.classroom.name}' was not approved.",
             notification_type='SYSTEM'
         )
 
         return Response(ClassJoinRequestSerializer(join_req).data, status=status.HTTP_200_OK)
 
-    @action(detail=True, methods=['post'], permission_classes=[IsApprovedTeacher])
+    @action(detail=True, methods=['post'])
     def regenerate_code(self, request, pk=None):
         classroom = self.get_object()
+        if classroom.teacher != request.user:
+            return Response({'detail': 'Not authorized.'}, status=status.HTTP_403_FORBIDDEN)
         new_code = classroom.regenerate_code()
         return Response({'code': new_code, 'detail': 'Join code successfully regenerated.'}, status=status.HTTP_200_OK)
 
-    @action(detail=True, methods=['post'], permission_classes=[IsApprovedTeacher])
+    @action(detail=True, methods=['post'])
     def toggle_joining(self, request, pk=None):
         classroom = self.get_object()
+        if classroom.teacher != request.user:
+            return Response({'detail': 'Not authorized.'}, status=status.HTTP_403_FORBIDDEN)
         classroom.is_joining_enabled = not classroom.is_joining_enabled
         classroom.save()
         return Response({'is_joining_enabled': classroom.is_joining_enabled}, status=status.HTTP_200_OK)
